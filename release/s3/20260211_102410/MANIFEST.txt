@@ -1,0 +1,6 @@
+ESP32-S3 release package generated: 20260211_102410
+Files:
+- bootloader.bin
+- partition-table.bin
+- ecu_s3_firmware.bin
+- ecu_s3_firmware.elf

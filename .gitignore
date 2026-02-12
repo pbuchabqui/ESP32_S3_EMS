@@ -1,0 +1,12 @@
+# Build artifacts
+**/build/
+**/build_*.log
+**/size_*.log
+
+# ESP-IDF generated files
+**/flasher_args.json
+**/flash_*.args
+
+# OS/editor
+.vscode/
+*.tmp
