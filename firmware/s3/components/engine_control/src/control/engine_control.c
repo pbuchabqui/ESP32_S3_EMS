@@ -54,19 +54,48 @@ static volatile uint32_t g_runtime_seq = 0;
 #define CLOSED_LOOP_CONFIG_KEY "closed_loop_cfg"
 #define CLOSED_LOOP_CONFIG_VERSION 1U
 
-#define STFT_LIMIT 0.25f
-#define LTFT_LIMIT 0.20f
-#define LTFT_ALPHA 0.01f
-#define LTFT_STABLE_MS 500U
-#define LTFT_RPM_DELTA_MAX 50U
-#define LTFT_LOAD_DELTA_MAX 50U
-#define LTFT_APPLY_THRESHOLD 0.03f
-#define MAP_SAVE_INTERVAL_MS 5000U
-#define PLANNER_DEADLINE_US 700U
-#define EXECUTOR_MAX_PLAN_AGE_US 3000U
-#define PLAN_RING_SIZE 16U
-#define PERF_WINDOW 128U
-#define SENSOR_FALLBACK_TIMEOUT_MS 100U
+/**
+ * @brief Short-Term Fuel Trim limits and configuration
+ * 
+ * STFT_LIMIT: Maximum adjustment factor (±25% from stoichiometric)
+ * LTFT_LIMIT: Maximum long-term adjustment (±20% to prevent runaway)
+ * LTFT_ALPHA: Exponential moving average factor for LTFT learning
+ *             Lower = slower learning, more stable
+ */
+#define STFT_LIMIT 0.25f       // ±25% max STFT adjustment
+#define LTFT_LIMIT 0.20f       // ±20% max LTFT adjustment
+#define LTFT_ALPHA 0.01f       // EMA factor for LTFT (slow learning)
+
+/**
+ * @brief LTFT learning stability thresholds
+ * 
+ * LTFT_STABLE_MS: Time RPM/load must be stable before LTFT learning
+ * LTFT_RPM_DELTA_MAX: Maximum RPM change to consider stable
+ * LTFT_LOAD_DELTA_MAX: Maximum load change to consider stable
+ * LTFT_APPLY_THRESHOLD: Minimum LTFT value before applying to fuel table
+ */
+#define LTFT_STABLE_MS 500U           // 500ms stability requirement
+#define LTFT_RPM_DELTA_MAX 50U        // ±50 RPM stability window
+#define LTFT_LOAD_DELTA_MAX 50U       // ±50 load units stability window
+#define LTFT_APPLY_THRESHOLD 0.03f    // 3% minimum LTFT to apply
+
+/**
+ * @brief Timing and performance configuration
+ * 
+ * MAP_SAVE_INTERVAL_MS: How often to save fuel maps to NVS
+ * PLANNER_DEADLINE_US: Maximum time for planner task execution
+ * EXECUTOR_MAX_PLAN_AGE_US: Maximum age of execution plan before discard
+ */
+#define MAP_SAVE_INTERVAL_MS 5000U    // Save maps every 5 seconds
+#define PLANNER_DEADLINE_US 700U      // 700µs planner deadline
+#define EXECUTOR_MAX_PLAN_AGE_US 3000U // 3ms max plan age
+
+/**
+ * @brief Ring buffer and performance monitoring configuration
+ */
+#define PLAN_RING_SIZE 16U            // Command ring buffer size
+#define PERF_WINDOW 128U              // Performance samples window
+#define SENSOR_FALLBACK_TIMEOUT_MS 100U // Sensor data timeout before fallback
 
 #define EOI_CONFIG_KEY "eoi_config"
 #define EOI_CONFIG_VERSION 2U

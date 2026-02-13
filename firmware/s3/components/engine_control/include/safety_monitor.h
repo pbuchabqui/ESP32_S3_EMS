@@ -231,16 +231,6 @@ uint16_t safety_get_accel_enrichment_factor(void);
  */
 uint32_t safety_get_accel_enrichment_duration(void);
 
-// Function prototypes for internal functions
-static bool validate_configuration(void);
-static void reset_failure_counters(void);
-
-// MAP sensor validation
-static sensor_status_t validate_map_pressure(int map_value);
-
-// Acceleration enrichment
-static bool should_apply_accel_enrichment(int current_map, int previous_map);
-
 #ifdef __cplusplus
 }
 #endif

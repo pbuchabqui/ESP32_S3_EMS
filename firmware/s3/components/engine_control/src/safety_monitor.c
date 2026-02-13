@@ -3,10 +3,16 @@
 #include "../include/logger.h"
 #include "esp_timer.h"
 #include "esp_task_wdt.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "soc/soc.h"
 
 // Limp mode recovery configuration
 #define LIMP_MIN_DURATION_MS 5000     // Minimum time in limp mode before recovery
 #define LIMP_RECOVERY_HYSTERESIS_MS 2000  // Time conditions must be safe before recovery
+
+// Thread safety spinlock
+static portMUX_TYPE g_safety_spinlock = portMUX_INITIALIZER_UNLOCKED;
 
 static limp_mode_t g_limp_mode = {
     .active = false,
@@ -75,15 +81,21 @@ bool safety_check_battery_voltage(uint16_t voltage) {
 }
 
 void safety_activate_limp_mode(void) {
+    portENTER_CRITICAL(&g_safety_spinlock);
     if (!g_limp_mode.active) {
         g_limp_mode.active = true;
         g_limp_mode.activation_time = (uint32_t)(esp_timer_get_time() / 1000);
+        portEXIT_CRITICAL(&g_safety_spinlock);
         LOG_SAFETY_W("Limp mode activated");
+    } else {
+        portEXIT_CRITICAL(&g_safety_spinlock);
     }
 }
 
 void safety_deactivate_limp_mode(void) {
+    portENTER_CRITICAL(&g_safety_spinlock);
     if (!g_limp_mode.active) {
+        portEXIT_CRITICAL(&g_safety_spinlock);
         return;  // Already inactive
     }
     
@@ -92,6 +104,7 @@ void safety_deactivate_limp_mode(void) {
     
     // Check minimum duration
     if (time_in_limp < LIMP_MIN_DURATION_MS) {
+        portEXIT_CRITICAL(&g_safety_spinlock);
         return;  // Must stay in limp mode for minimum duration
     }
     
@@ -99,12 +112,14 @@ void safety_deactivate_limp_mode(void) {
     if (!g_limp_conditions_safe) {
         g_limp_recovery_start_ms = now_ms;
         g_limp_conditions_safe = true;
+        portEXIT_CRITICAL(&g_safety_spinlock);
         LOG_SAFETY_I("Limp mode recovery conditions met, monitoring...");
         return;
     }
     
     uint32_t safe_duration = now_ms - g_limp_recovery_start_ms;
     if (safe_duration < LIMP_RECOVERY_HYSTERESIS_MS) {
+        portEXIT_CRITICAL(&g_safety_spinlock);
         return;  // Conditions must be safe for hysteresis period
     }
     
@@ -113,22 +128,31 @@ void safety_deactivate_limp_mode(void) {
     g_limp_mode.activation_time = 0;
     g_limp_conditions_safe = false;
     g_limp_recovery_start_ms = 0;
+    portEXIT_CRITICAL(&g_safety_spinlock);
     LOG_SAFETY_I("Limp mode deactivated - auto recovery");
 }
 
 void safety_mark_conditions_safe(bool safe) {
+    portENTER_CRITICAL(&g_safety_spinlock);
     if (!safe) {
         g_limp_conditions_safe = false;
         g_limp_recovery_start_ms = 0;
     }
+    portEXIT_CRITICAL(&g_safety_spinlock);
 }
 
 bool safety_is_limp_mode_active(void) {
-    return g_limp_mode.active;
+    portENTER_CRITICAL(&g_safety_spinlock);
+    bool active = g_limp_mode.active;
+    portEXIT_CRITICAL(&g_safety_spinlock);
+    return active;
 }
 
 limp_mode_t safety_get_limp_mode_status(void) {
-    return g_limp_mode;
+    portENTER_CRITICAL(&g_safety_spinlock);
+    limp_mode_t status = g_limp_mode;
+    portEXIT_CRITICAL(&g_safety_spinlock);
+    return status;
 }
 
 bool safety_watchdog_init(uint32_t timeout_ms) {

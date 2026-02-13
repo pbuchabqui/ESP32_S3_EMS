@@ -162,8 +162,14 @@ esp_err_t sync_init(void) {
         return err;
     }
 
-    pcnt_unit_stop(g_sync_pcnt_unit);
-    pcnt_unit_clear_count(g_sync_pcnt_unit);
+    err = pcnt_unit_stop(g_sync_pcnt_unit);
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGW("SYNC", "PCNT stop warning: %s", esp_err_to_name(err));
+    }
+    err = pcnt_unit_clear_count(g_sync_pcnt_unit);
+    if (err != ESP_OK) {
+        ESP_LOGW("SYNC", "PCNT clear warning: %s", esp_err_to_name(err));
+    }
 
     // Initialize hardware capture (GPIO -> ETM -> GPTimer capture)
     err = sync_init_hardware_capture();
