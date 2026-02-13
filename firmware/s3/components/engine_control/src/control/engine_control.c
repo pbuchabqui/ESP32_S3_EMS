@@ -12,8 +12,6 @@
 #include "../include/map_storage.h"
 #include "../include/safety_monitor.h"
 #include "../include/twai_lambda.h"
-#include "../include/mcpwm_injection.h"
-#include "../include/mcpwm_ignition.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
