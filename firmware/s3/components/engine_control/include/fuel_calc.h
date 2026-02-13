@@ -30,6 +30,18 @@ uint32_t fuel_calc_pulsewidth_us(const sensor_data_t *sensors,
 
 uint16_t fuel_calc_warmup_enrichment(const sensor_data_t *sensors);
 
+/**
+ * @brief Calculate acceleration enrichment factor
+ * 
+ * Detects rapid MAP increase (throttle tip-in) and provides
+ * temporary enrichment to prevent lean condition.
+ * 
+ * @param current_map_kpa10 Current MAP value in kPa * 10
+ * @param now_ms Current time in milliseconds
+ * @return Enrichment factor (100 = no enrichment, 150 = 50% enrichment)
+ */
+uint16_t fuel_calc_accel_enrichment(uint16_t current_map_kpa10, uint32_t now_ms);
+
 #ifdef __cplusplus
 }
 #endif

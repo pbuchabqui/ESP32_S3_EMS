@@ -12,20 +12,11 @@
 #include "../include/mcpwm_injection_hp.h"
 #include "../include/sync.h"
 #include "../include/high_precision_timing.h"
+#include "../include/math_utils.h"
 
 static fuel_injection_config_t g_fuel_cfg = {
     .cyl_tdc_deg = {0.0f, 180.0f, 360.0f, 540.0f},
 };
-
-static float wrap_angle_720(float angle_deg) {
-    while (angle_deg >= 720.0f) {
-        angle_deg -= 720.0f;
-    }
-    while (angle_deg < 0.0f) {
-        angle_deg += 720.0f;
-    }
-    return angle_deg;
-}
 
 static float compute_current_angle_deg(const sync_data_t *sync, uint32_t tooth_count) {
     float degrees_per_tooth = 360.0f / (float)(tooth_count + 2);
@@ -89,8 +80,8 @@ bool fuel_injection_hp_schedule_eoi_ex(uint8_t cylinder_id,
 
     uint32_t delay_us = (uint32_t)((delta_deg * us_per_deg) + 0.5f);
     
-    // Obter contador atual
-    uint32_t current_counter = sync->tooth_period * sync->tooth_index;
+    // Obter contador atual do timer MCPWM (valor real, não sintético)
+    uint32_t current_counter = mcpwm_injection_hp_get_counter((uint8_t)(cylinder_id - 1));
     
     if (info) {
         info->eoi_deg = eoi_deg;
@@ -123,7 +114,8 @@ bool fuel_injection_hp_schedule_sequential(uint32_t pulsewidth_us[4],
     }
     
     uint32_t offsets[4];
-    uint32_t current_counter = sync->tooth_period * sync->tooth_index;
+    // Obter contador atual do timer MCPWM (valor real, não sintético)
+    uint32_t current_counter = mcpwm_injection_hp_get_counter(0);
     
     for (int i = 0; i < 4; i++) {
         fuel_injection_schedule_info_t info;

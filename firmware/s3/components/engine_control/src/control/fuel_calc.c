@@ -1,7 +1,14 @@
 #include "../include/fuel_calc.h"
 #include "../include/table_16x16.h"
+#include "../include/s3_control_config.h"
+#include "esp_timer.h"
 #include <math.h>
 #include <string.h>
+
+// Acceleration enrichment state
+static int g_prev_map_kpa10 = 0;
+static uint32_t g_accel_enrich_start_ms = 0;
+static bool g_accel_enrich_active = false;
 
 typedef struct {
     uint16_t last_rpm;
@@ -99,6 +106,34 @@ uint16_t fuel_calc_warmup_enrichment(const sensor_data_t *sensors) {
     return (uint16_t)(enrich + 0.5f);
 }
 
+uint16_t fuel_calc_accel_enrichment(uint16_t current_map_kpa10, uint32_t now_ms) {
+    int map_delta = (int)current_map_kpa10 - (int)g_prev_map_kpa10;
+    g_prev_map_kpa10 = current_map_kpa10;
+    
+    // Check for acceleration (rapid MAP increase)
+    if (map_delta > TPS_DOT_THRESHOLD) {
+        g_accel_enrich_active = true;
+        g_accel_enrich_start_ms = now_ms;
+    }
+    
+    // If enrichment is active, calculate factor
+    if (g_accel_enrich_active) {
+        uint32_t elapsed = now_ms - g_accel_enrich_start_ms;
+        
+        // Enrichment duration: 200ms decay
+        if (elapsed < 200) {
+            // Linear decay from TPS_DOT_ENRICH_MAX to 100%
+            float decay = 1.0f - (float)elapsed / 200.0f;
+            float enrich = 100.0f + (TPS_DOT_ENRICH_MAX - 100.0f) * decay;
+            return (uint16_t)(enrich + 0.5f);
+        } else {
+            g_accel_enrich_active = false;
+        }
+    }
+    
+    return 100;  // No enrichment
+}
+
 uint32_t fuel_calc_pulsewidth_us(const sensor_data_t *sensors,
                                  uint16_t rpm,
                                  uint16_t ve_x10,
@@ -116,6 +151,11 @@ uint32_t fuel_calc_pulsewidth_us(const sensor_data_t *sensors,
     uint16_t warmup = fuel_calc_warmup_enrichment(sensors);
     float warmup_factor = warmup / 100.0f;
 
+    // Acceleration enrichment
+    uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    uint16_t accel = fuel_calc_accel_enrichment(sensors->map_kpa10, now_ms);
+    float accel_factor = accel / 100.0f;
+
     float lambda_factor = 1.0f + lambda_correction;
     if (lambda_factor < 0.75f) {
         lambda_factor = 0.75f;
@@ -123,7 +163,7 @@ uint32_t fuel_calc_pulsewidth_us(const sensor_data_t *sensors,
         lambda_factor = 1.25f;
     }
 
-    float pw = base_pw * warmup_factor * lambda_factor;
+    float pw = base_pw * warmup_factor * accel_factor * lambda_factor;
     if (pw < PW_MIN_US) {
         pw = PW_MIN_US;
     } else if (pw > PW_MAX_US) {

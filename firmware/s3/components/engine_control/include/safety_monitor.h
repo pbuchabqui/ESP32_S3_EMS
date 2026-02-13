@@ -118,9 +118,22 @@ void safety_activate_limp_mode(void);
 /**
  * @brief Deactivate limp mode
  * 
- * Deactivates limp mode and restores normal operation
+ * Deactivates limp mode and restores normal operation.
+ * Auto-recovery requires:
+ * - Minimum 5 seconds in limp mode
+ * - Conditions safe for 2 seconds (hysteresis)
  */
 void safety_deactivate_limp_mode(void);
+
+/**
+ * @brief Mark conditions as safe or unsafe for limp mode recovery
+ * 
+ * Call with safe=true when all safety conditions are met.
+ * Call with safe=false when any safety condition fails.
+ * 
+ * @param safe true if conditions are safe for recovery, false otherwise
+ */
+void safety_mark_conditions_safe(bool safe);
 
 /**
  * @brief Check if limp mode is active

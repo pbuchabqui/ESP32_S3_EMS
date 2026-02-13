@@ -58,7 +58,7 @@ static bool mcpwm_ok_hp(esp_err_t err, const char *op, int channel) {
     return false;
 }
 
-static uint32_t clamp_u32_hp(uint32_t v, uint32_t min_v, uint32_t max_v) {
+IRAM_ATTR static uint32_t clamp_u32_hp(uint32_t v, uint32_t min_v, uint32_t max_v) {
     if (v < min_v) return min_v;
     if (v > max_v) return max_v;
     return v;
@@ -155,8 +155,9 @@ bool mcpwm_injection_hp_configure(const mcpwm_injection_config_t *config) {
 
 /**
  * @brief Agenda evento de injeção com compare absoluto
+ * @note IRAM_ATTR - função crítica de timing chamada em contexto de ISR
  */
-bool mcpwm_injection_hp_schedule_one_shot_absolute(
+IRAM_ATTR bool mcpwm_injection_hp_schedule_one_shot_absolute(
     uint8_t cylinder_id,
     uint32_t delay_us,
     uint32_t pulsewidth_us,
@@ -173,13 +174,12 @@ bool mcpwm_injection_hp_schedule_one_shot_absolute(
 
     // Verificar se o target já passou
     if (delay_us <= current_counter) {
-        ESP_LOGW(TAG, "Injector target %lu <= counter %lu - scheduling for next window", delay_us, current_counter);
         return false;
     }
 
-    if (!mcpwm_ok_hp(mcpwm_comparator_set_compare_value(ch->cmp_start, start_ticks), "set_compare_start_abs", cylinder_id)) return false;
-    if (!mcpwm_ok_hp(mcpwm_comparator_set_compare_value(ch->cmp_end, end_ticks), "set_compare_end_abs", cylinder_id)) return false;
-    if (!mcpwm_ok_hp(mcpwm_generator_set_force_level(ch->gen, -1, false), "generator_release", cylinder_id)) return false;
+    mcpwm_comparator_set_compare_value(ch->cmp_start, start_ticks);
+    mcpwm_comparator_set_compare_value(ch->cmp_end, end_ticks);
+    mcpwm_generator_set_force_level(ch->gen, -1, false);
 
     // NÃO reiniciar timer - usar timer contínuo!
 
@@ -194,8 +194,9 @@ bool mcpwm_injection_hp_schedule_one_shot_absolute(
 
 /**
  * @brief Agenda múltiplos injetores sequencialmente
+ * @note IRAM_ATTR - função crítica de timing
  */
-bool mcpwm_injection_hp_schedule_sequential_absolute(
+IRAM_ATTR bool mcpwm_injection_hp_schedule_sequential_absolute(
     uint32_t base_delay_us,
     uint32_t pulsewidth_us,
     uint32_t cylinder_offsets[4],
@@ -252,6 +253,18 @@ void mcpwm_injection_hp_get_jitter_stats(float *avg_us, float *max_us, float *mi
 void mcpwm_injection_hp_apply_latency_compensation(float *pulsewidth_us, float battery_voltage, float temperature) {
     float injector_latency = hp_get_injector_latency(&g_hw_latency_inj, battery_voltage, temperature);
     *pulsewidth_us += injector_latency;
+}
+
+IRAM_ATTR uint32_t mcpwm_injection_hp_get_counter(uint8_t cylinder_id) {
+    if (cylinder_id >= 4 || !g_initialized_hp || !g_channels_hp[cylinder_id].timer) {
+        return 0;
+    }
+    uint32_t counter = 0;
+    esp_err_t err = mcpwm_timer_get_counter_value(g_channels_hp[cylinder_id].timer, &counter);
+    if (err != ESP_OK) {
+        return 0;
+    }
+    return counter;
 }
 
 const mcpwm_injection_config_t* mcpwm_injection_hp_get_config(void) {

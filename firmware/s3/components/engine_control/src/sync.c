@@ -336,14 +336,24 @@ esp_err_t sync_get_data(sync_data_t *data) {
     portEXIT_CRITICAL(&g_sync_spinlock);
 
     uint32_t now_us = (uint32_t)esp_timer_get_time();
-    if (data->last_capture_time == 0 || now_us < data->last_capture_time) {
+    
+    // Handle timer overflow correctly
+    // 32-bit µs overflow occurs every ~72 minutes
+    if (data->last_capture_time == 0) {
         data->latency_us = UINT32_MAX;
         data->sync_valid = false;
         data->sync_acquired = false;
         return ESP_OK;
     }
+    
+    // Calculate latency with overflow handling
+    if (now_us >= data->last_capture_time) {
+        data->latency_us = now_us - data->last_capture_time;
+    } else {
+        // Overflow occurred - calculate wrapped difference
+        data->latency_us = (UINT32_MAX - data->last_capture_time) + now_us;
+    }
 
-    data->latency_us = now_us - data->last_capture_time;
     data->sync_valid = (data->rpm > 0) && (data->latency_us < SYNC_VALID_TIMEOUT_US);
     if (!data->sync_valid) {
         data->sync_acquired = false;
@@ -397,7 +407,7 @@ void sync_unregister_tooth_callback(void) {
     portEXIT_CRITICAL(&g_sync_spinlock);
 }
 
-static void sync_update_from_capture(uint64_t capture_us, bool from_isr, bool emit_log) {
+IRAM_ATTR static void sync_update_from_capture(uint64_t capture_us, bool from_isr, bool emit_log) {
     if (from_isr) {
         portENTER_CRITICAL_ISR(&g_sync_spinlock);
     } else {
@@ -511,7 +521,7 @@ static void sync_update_from_capture(uint64_t capture_us, bool from_isr, bool em
     }
 }
 
-static void sync_update_cmp_capture(uint64_t capture_us, bool from_isr) {
+IRAM_ATTR static void sync_update_cmp_capture(uint64_t capture_us, bool from_isr) {
     if (from_isr) {
         portENTER_CRITICAL_ISR(&g_sync_spinlock);
     } else {

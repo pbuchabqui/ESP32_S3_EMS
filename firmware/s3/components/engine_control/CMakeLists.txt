@@ -18,6 +18,11 @@ idf_component_register(
         "src/high_precision_timing.c"
         "src/safety_monitor.c"
         "src/twai_lambda.c"
+        "src/espnow_link.c"
+        "src/cli_interface.c"
+        "src/data_logger.c"
+        "src/tuning_protocol.c"
+        "src/test_framework.c"
     INCLUDE_DIRS
         "include"
     REQUIRES
@@ -32,6 +37,10 @@ idf_component_register(
         driver
         esp_system
         nvs_flash
+        esp_wifi
+        esp_event
+        esp_netif
+        esp_now
 )
 
 # Add compilation flags

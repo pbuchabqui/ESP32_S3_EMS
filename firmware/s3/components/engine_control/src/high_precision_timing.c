@@ -34,7 +34,7 @@ void hp_init_phase_predictor(phase_predictor_t *predictor, float initial_period)
     ESP_LOGI(TAG, "Phase predictor initialized with period: %.2f us", initial_period);
 }
 
-void hp_update_phase_predictor(phase_predictor_t *predictor, float current_period, uint32_t timestamp) {
+IRAM_ATTR void hp_update_phase_predictor(phase_predictor_t *predictor, float current_period, uint32_t timestamp) {
     if (predictor == NULL || current_period <= 0) {
         return;
     }
@@ -108,7 +108,7 @@ void hp_init_jitter_measurer(jitter_measurer_t *measurer) {
     ESP_LOGI(TAG, "Jitter measurer initialized");
 }
 
-void hp_record_jitter(jitter_measurer_t *measurer, uint32_t target_cycles, uint32_t actual_cycles) {
+IRAM_ATTR void hp_record_jitter(jitter_measurer_t *measurer, uint32_t target_cycles, uint32_t actual_cycles) {
     if (measurer == NULL) {
         return;
     }

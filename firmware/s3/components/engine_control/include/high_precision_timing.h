@@ -7,6 +7,11 @@
  * - Core isolamento total
  * - Predição de fase adaptativa
  * - Compensação de latência física
+ * 
+ * Otimizações:
+ * - Conversões us/cycles usando inteiros quando possível
+ * - Funções inline para evitar overhead de chamada
+ * - IRAM_ATTR para código crítico em ISR
  */
 
 #ifndef HIGH_PRECISION_TIMING_H
@@ -19,6 +24,13 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+//=============================================================================
+// CONSTANTES DE OTIMIZAÇÃO
+//=============================================================================
+
+// CPU frequency em MHz (compile-time constant para otimização)
+#define HP_CPU_FREQ_MHZ CONFIG_ESP32_DEFAULT_CPU_FREQ_MHZ
 
 //=============================================================================
 // SISTEMA DE CONTAGEM DE CICLOS (CCOUNT)
@@ -44,21 +56,41 @@ IRAM_ATTR static inline void hp_set_cycle_alarm(uint32_t target_cycles) {
 }
 
 /**
- * @brief Converte microssegundos para ciclos de CPU
+ * @brief Converte microssegundos para ciclos de CPU (versão inteira otimizada)
  * @param us Tempo em microssegundos
  * @return Número de ciclos correspondente
+ * @note Usa multiplicação inteira para melhor performance
  */
-IRAM_ATTR static inline uint32_t hp_us_to_cycles(float us) {
-    return (uint32_t)(us * (float)CONFIG_ESP32_DEFAULT_CPU_FREQ_MHZ);
+IRAM_ATTR static inline uint32_t hp_us_to_cycles(uint32_t us) {
+    return us * HP_CPU_FREQ_MHZ;
 }
 
 /**
- * @brief Converte ciclos para microssegundos
+ * @brief Converte microssegundos para ciclos (versão float para precisão)
+ * @param us Tempo em microssegundos (float)
+ * @return Número de ciclos correspondente
+ */
+IRAM_ATTR static inline uint32_t hp_us_to_cycles_f(float us) {
+    return (uint32_t)(us * (float)HP_CPU_FREQ_MHZ);
+}
+
+/**
+ * @brief Converte ciclos para microssegundos (versão inteira otimizada)
+ * @param cycles Número de ciclos
+ * @return Tempo em microssegundos
+ * @note Usa divisão inteira para melhor performance
+ */
+IRAM_ATTR static inline uint32_t hp_cycles_to_us_u32(uint32_t cycles) {
+    return cycles / HP_CPU_FREQ_MHZ;
+}
+
+/**
+ * @brief Converte ciclos para microssegundos (versão float)
  * @param cycles Número de ciclos
  * @return Tempo em microssegundos
  */
 IRAM_ATTR static inline float hp_cycles_to_us(uint32_t cycles) {
-    return (float)cycles / (float)CONFIG_ESP32_DEFAULT_CPU_FREQ_MHZ;
+    return (float)cycles / (float)HP_CPU_FREQ_MHZ;
 }
 
 //=============================================================================
@@ -90,8 +122,9 @@ void hp_init_phase_predictor(phase_predictor_t *predictor, float initial_period)
  * @param predictor Ponteiro para a estrutura do preditor
  * @param current_period Período atual medido em microssegundos
  * @param timestamp Timestamp atual em ciclos
+ * @note IRAM_ATTR - função crítica de timing chamada em ISR context
  */
-void hp_update_phase_predictor(phase_predictor_t *predictor, float current_period, uint32_t timestamp);
+IRAM_ATTR void hp_update_phase_predictor(phase_predictor_t *predictor, float current_period, uint32_t timestamp);
 
 /**
  * @brief Prediz o próximo período
@@ -190,8 +223,9 @@ void hp_init_jitter_measurer(jitter_measurer_t *measurer);
  * @param measurer Ponteiro para a estrutura de medição
  * @param target_target Target programado em ciclos
  * @param actual_target Target real em ciclos
+ * @note IRAM_ATTR - função crítica chamada em timing-critical context
  */
-void hp_record_jitter(jitter_measurer_t *measurer, uint32_t target_target, uint32_t actual_target);
+IRAM_ATTR void hp_record_jitter(jitter_measurer_t *measurer, uint32_t target_target, uint32_t actual_target);
 
 /**
  * @brief Obtém estatísticas de jitter
@@ -244,17 +278,17 @@ BaseType_t hp_create_critical_task(TaskFunction_t pvTaskCode,
                                     BaseType_t core_id);
 
 //=============================================================================
-// UTILITÁRIOS DE TIMING
+// UTILITÁRIOS DE TIMING OTIMIZADOS
 //=============================================================================
 
 /**
- * @brief Calcula delay de scheduling
+ * @brief Calcula delay de scheduling (versão otimizada com inteiros)
  * @param target_us Tempo alvo em microssegundos
- * @param current_time Tempo atual em ciclos
+ * @param current_cycles Tempo atual em ciclos
  * @return Delay restante em ciclos
  */
 IRAM_ATTR static inline uint32_t hp_calculate_schedule_delay(uint32_t target_us, uint32_t current_cycles) {
-    uint32_t target_cycles = hp_us_to_cycles((float)target_us);
+    uint32_t target_cycles = hp_us_to_cycles(target_us);
     int32_t delay_cycles = (int32_t)target_cycles - (int32_t)current_cycles;
     return (delay_cycles > 0) ? (uint32_t)delay_cycles : 0;
 }
@@ -267,6 +301,90 @@ IRAM_ATTR static inline uint32_t hp_calculate_schedule_delay(uint32_t target_us,
  */
 IRAM_ATTR static inline bool hp_check_timer_overflow(uint32_t last_count, uint32_t current_count) {
     return (current_count < last_count);
+}
+
+/**
+ * @brief Calcula diferença de tempo entre dois timestamps com tratamento de overflow
+ * @param start_time Timestamp inicial em ciclos
+ * @param end_time Timestamp final em ciclos
+ * @return Diferença em ciclos
+ */
+IRAM_ATTR static inline uint32_t hp_elapsed_cycles(uint32_t start_time, uint32_t end_time) {
+    if (end_time >= start_time) {
+        return end_time - start_time;
+    }
+    // Overflow occurred
+    return (UINT32_MAX - start_time) + end_time + 1;
+}
+
+/**
+ * @brief Calcula diferença de tempo em microssegundos
+ * @param start_time Timestamp inicial em ciclos
+ * @param end_time Timestamp final em ciclos
+ * @return Diferença em microssegundos
+ */
+IRAM_ATTR static inline uint32_t hp_elapsed_us(uint32_t start_time, uint32_t end_time) {
+    return hp_cycles_to_us_u32(hp_elapsed_cycles(start_time, end_time));
+}
+
+/**
+ * @brief Verifica se um deadline foi atingido
+ * @param start_time Timestamp inicial em ciclos
+ * @param deadline_us Deadline em microssegundos
+ * @return true se o deadline foi atingido
+ */
+IRAM_ATTR static inline bool hp_deadline_reached(uint32_t start_time, uint32_t deadline_us) {
+    uint32_t now = hp_get_cycle_count();
+    uint32_t elapsed = hp_elapsed_cycles(start_time, now);
+    return (elapsed >= hp_us_to_cycles(deadline_us));
+}
+
+/**
+ * @brief Aguarda ativamente por um número de microssegundos (busy wait)
+ * @param us Tempo para aguardar em microssegundos
+ * @note Usa busy-wait com CCOUNT para máxima precisão
+ */
+IRAM_ATTR static inline void hp_delay_us(uint32_t us) {
+    uint32_t start = hp_get_cycle_count();
+    uint32_t target = start + hp_us_to_cycles(us);
+    while ((int32_t)(hp_get_cycle_count() - start) < (int32_t)hp_us_to_cycles(us)) {
+        // Busy wait
+    }
+}
+
+/**
+ * @brief Calcula tempo por grau para RPM dado
+ * @param rpm RPM do motor
+ * @return Microssegundos por grau
+ */
+IRAM_ATTR static inline uint32_t hp_us_per_degree(uint16_t rpm) {
+    if (rpm == 0) return 0;
+    // (60 * 1000000) / (rpm * 360) = 166666 / rpm
+    return 166666U / rpm;
+}
+
+/**
+ * @brief Converte graus para microssegundos dado RPM
+ * @param degrees Ângulo em graus
+ * @param rpm RPM do motor
+ * @return Tempo em microssegundos
+ */
+IRAM_ATTR static inline uint32_t hp_degrees_to_us(float degrees, uint16_t rpm) {
+    if (rpm == 0) return 0;
+    // degrees * (60 * 1000000) / (rpm * 360) = degrees * 166666 / rpm
+    return (uint32_t)(degrees * 166666.0f / (float)rpm);
+}
+
+/**
+ * @brief Converte microssegundos para graus dado RPM
+ * @param us Tempo em microssegundos
+ * @param rpm RPM do motor
+ * @return Ângulo em graus
+ */
+IRAM_ATTR static inline float hp_us_to_degrees(uint32_t us, uint16_t rpm) {
+    if (rpm == 0) return 0.0f;
+    // us * (rpm * 360) / (60 * 1000000) = us * rpm * 0.000006
+    return (float)us * (float)rpm * 0.000006f;
 }
 
 #ifdef __cplusplus

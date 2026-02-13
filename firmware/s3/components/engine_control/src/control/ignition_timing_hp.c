@@ -17,6 +17,7 @@
 #include "../include/sensor_processing.h"
 #include "../include/sync.h"
 #include "../include/high_precision_timing.h"
+#include "../include/math_utils.h"
 
 // Instâncias de alta precisão
 static phase_predictor_t g_phase_predictor;
@@ -24,12 +25,6 @@ static hardware_latency_comp_t g_hw_latency;
 static jitter_measurer_t g_jitter_measurer;
 
 static const float g_cyl_tdc_deg[4] = {0.0f, 180.0f, 360.0f, 540.0f};
-
-static float clampf_local(float v, float min_v, float max_v) {
-    if (v < min_v) return min_v;
-    if (v > max_v) return max_v;
-    return v;
-}
 
 static float apply_temp_dwell_bias(float battery_voltage, int16_t clt_c) {
     if (clt_c >= 105) {
@@ -41,17 +36,7 @@ static float apply_temp_dwell_bias(float battery_voltage, int16_t clt_c) {
     } else if (clt_c <= 20) {
         battery_voltage -= 0.4f;
     }
-    return clampf_local(battery_voltage, 8.0f, 16.5f);
-}
-
-static float wrap_angle_720(float angle_deg) {
-    while (angle_deg >= 720.0f) {
-        angle_deg -= 720.0f;
-    }
-    while (angle_deg < 0.0f) {
-        angle_deg += 720.0f;
-    }
-    return angle_deg;
+    return clamp_float(battery_voltage, 8.0f, 16.5f);
 }
 
 static float compute_current_angle_deg(const sync_data_t *sync, uint32_t tooth_count) {
@@ -101,7 +86,7 @@ void ignition_hp_apply_timing(uint16_t advance_deg10, uint16_t rpm) {
         }
         battery_voltage = apply_temp_dwell_bias(battery_voltage, sensors.clt_c);
     } else {
-        battery_voltage = clampf_local(battery_voltage, 8.0f, 16.5f);
+        battery_voltage = clamp_float(battery_voltage, 8.0f, 16.5f);
     }
 
     sync_data_t sync_data = {0};
@@ -120,10 +105,9 @@ void ignition_hp_apply_timing(uint16_t advance_deg10, uint16_t rpm) {
         if (us_per_deg <= 0.0f) {
             have_sync = false;
         } else {
-            // Obter contador atual do timer
-            mcpwm_timer_handle_t timer = NULL;
-            // Nota: Este valor deve ser passado do timer do MCPWM
-            current_counter = sync_data.tooth_period * sync_data.tooth_index;
+            // Obter contador atual do timer MCPWM (valor real, não sintético)
+            // Usa cilindro 0 como referência (todos os timers estão sincronizados)
+            current_counter = mcpwm_ignition_hp_get_counter(0);
         }
     }
 

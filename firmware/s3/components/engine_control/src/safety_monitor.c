@@ -4,6 +4,10 @@
 #include "esp_timer.h"
 #include "esp_task_wdt.h"
 
+// Limp mode recovery configuration
+#define LIMP_MIN_DURATION_MS 5000     // Minimum time in limp mode before recovery
+#define LIMP_RECOVERY_HYSTERESIS_MS 2000  // Time conditions must be safe before recovery
+
 static limp_mode_t g_limp_mode = {
     .active = false,
     .rpm_limit = 3000,
@@ -12,6 +16,9 @@ static limp_mode_t g_limp_mode = {
     .lambda_target = 1000,
     .activation_time = 0,
 };
+
+static uint32_t g_limp_recovery_start_ms = 0;  // When conditions became safe
+static bool g_limp_conditions_safe = false;
 
 static watchdog_config_t g_watchdog = {
     .enabled = false,
@@ -76,9 +83,44 @@ void safety_activate_limp_mode(void) {
 }
 
 void safety_deactivate_limp_mode(void) {
+    if (!g_limp_mode.active) {
+        return;  // Already inactive
+    }
+    
+    uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    uint32_t time_in_limp = now_ms - g_limp_mode.activation_time;
+    
+    // Check minimum duration
+    if (time_in_limp < LIMP_MIN_DURATION_MS) {
+        return;  // Must stay in limp mode for minimum duration
+    }
+    
+    // Check if conditions have been safe for hysteresis period
+    if (!g_limp_conditions_safe) {
+        g_limp_recovery_start_ms = now_ms;
+        g_limp_conditions_safe = true;
+        LOG_SAFETY_I("Limp mode recovery conditions met, monitoring...");
+        return;
+    }
+    
+    uint32_t safe_duration = now_ms - g_limp_recovery_start_ms;
+    if (safe_duration < LIMP_RECOVERY_HYSTERESIS_MS) {
+        return;  // Conditions must be safe for hysteresis period
+    }
+    
+    // All checks passed - safe to recover
     g_limp_mode.active = false;
     g_limp_mode.activation_time = 0;
-    LOG_SAFETY_I("Limp mode deactivated");
+    g_limp_conditions_safe = false;
+    g_limp_recovery_start_ms = 0;
+    LOG_SAFETY_I("Limp mode deactivated - auto recovery");
+}
+
+void safety_mark_conditions_safe(bool safe) {
+    if (!safe) {
+        g_limp_conditions_safe = false;
+        g_limp_recovery_start_ms = 0;
+    }
 }
 
 bool safety_is_limp_mode_active(void) {

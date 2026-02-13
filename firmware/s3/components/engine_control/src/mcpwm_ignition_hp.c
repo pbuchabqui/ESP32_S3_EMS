@@ -53,20 +53,20 @@ static bool mcpwm_ok_hp(esp_err_t err, const char *op, int channel) {
     return false;
 }
 
-static float calculate_dwell_time_hp(float battery_voltage) {
+IRAM_ATTR static float calculate_dwell_time_hp(float battery_voltage) {
     if (battery_voltage < 11.0f) return 4.5f;
     if (battery_voltage < 12.5f) return 3.5f;
     if (battery_voltage < 14.0f) return 3.0f;
     return 2.8f;
 }
 
-static float adjust_dwell_for_rpm_hp(float base_dwell, uint16_t rpm) {
+IRAM_ATTR static float adjust_dwell_for_rpm_hp(float base_dwell, uint16_t rpm) {
     if (rpm > 8000) return base_dwell * 0.85f;
     if (rpm < 1000) return base_dwell * 1.15f;
     return base_dwell;
 }
 
-static uint32_t calculate_spark_ticks_hp(uint16_t rpm, float advance_degrees) {
+IRAM_ATTR static uint32_t calculate_spark_ticks_hp(uint16_t rpm, float advance_degrees) {
     if (rpm == 0) return 0;
     float time_per_degree = (60.0f / (rpm * 360.0f)) * 1000000.0f;
     float timing_us = advance_degrees * time_per_degree;
@@ -153,7 +153,11 @@ bool mcpwm_ignition_hp_init(void) {
     return true;
 }
 
-bool mcpwm_ignition_hp_schedule_one_shot_absolute(
+/**
+ * @brief Agenda evento de ignição com compare absoluto
+ * @note IRAM_ATTR - função crítica de timing chamada em contexto de ISR
+ */
+IRAM_ATTR bool mcpwm_ignition_hp_schedule_one_shot_absolute(
     uint8_t cylinder_id, uint32_t target_us, uint16_t rpm, 
     float battery_voltage, uint32_t current_counter)
 {
@@ -169,16 +173,12 @@ bool mcpwm_ignition_hp_schedule_one_shot_absolute(
     uint32_t dwell_start_ticks = (target_us > dwell_ticks) ? (target_us - dwell_ticks) : 0;
 
     if (target_us <= current_counter) {
-        ESP_LOGW(TAG, "Target %lu <= counter %lu - scheduling for next window", target_us, current_counter);
         return false;
     }
 
-    if (!mcpwm_ok_hp(mcpwm_comparator_set_compare_value(ch->cmp_dwell, dwell_start_ticks), 
-                     "set_compare_dwell_abs", cylinder_id - 1)) return false;
-    if (!mcpwm_ok_hp(mcpwm_comparator_set_compare_value(ch->cmp_spark, target_us), 
-                     "set_compare_spark_abs", cylinder_id - 1)) return false;
-    if (!mcpwm_ok_hp(mcpwm_generator_set_force_level(ch->gen, -1, false), 
-                     "generator_release", cylinder_id - 1)) return false;
+    mcpwm_comparator_set_compare_value(ch->cmp_dwell, dwell_start_ticks);
+    mcpwm_comparator_set_compare_value(ch->cmp_spark, target_us);
+    mcpwm_generator_set_force_level(ch->gen, -1, false);
 
     ch->current_dwell_ms = dwell_time_ms;
     ch->is_active = true;
@@ -198,7 +198,7 @@ bool mcpwm_ignition_hp_stop_cylinder(uint8_t cylinder_id) {
     return true;
 }
 
-void mcpwm_ignition_hp_update_phase_predictor(float measured_period_us, uint32_t timestamp) {
+IRAM_ATTR void mcpwm_ignition_hp_update_phase_predictor(float measured_period_us, uint32_t timestamp) {
     hp_update_phase_predictor(&g_phase_predictor, measured_period_us, timestamp);
 }
 
@@ -209,6 +209,18 @@ void mcpwm_ignition_hp_get_jitter_stats(float *avg_us, float *max_us, float *min
 void mcpwm_ignition_hp_apply_latency_compensation(float *timing_us, float battery_voltage, float temperature) {
     float coil_latency = hp_get_coil_latency(&g_hw_latency, battery_voltage, temperature);
     *timing_us += coil_latency;
+}
+
+IRAM_ATTR uint32_t mcpwm_ignition_hp_get_counter(uint8_t cylinder_id) {
+    if (cylinder_id >= 4 || !g_initialized_hp || !g_channels_hp[cylinder_id].timer) {
+        return 0;
+    }
+    uint32_t counter = 0;
+    esp_err_t err = mcpwm_timer_get_counter_value(g_channels_hp[cylinder_id].timer, &counter);
+    if (err != ESP_OK) {
+        return 0;
+    }
+    return counter;
 }
 
 bool mcpwm_ignition_hp_deinit(void) {

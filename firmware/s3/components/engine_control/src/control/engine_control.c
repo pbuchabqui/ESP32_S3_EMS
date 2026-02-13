@@ -12,6 +12,8 @@
 #include "../include/map_storage.h"
 #include "../include/safety_monitor.h"
 #include "../include/twai_lambda.h"
+#include "../include/math_utils.h"
+#include "../include/espnow_link.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -46,6 +48,7 @@ static bool g_map_dirty = false;
 static bool g_closed_loop_enabled = true;
 static sensor_data_t g_last_sensor_snapshot = {0};
 static bool g_last_sensor_valid = false;
+static uint32_t g_last_sensor_timestamp_ms = 0;
 static volatile uint32_t g_runtime_seq = 0;
 
 #define CLOSED_LOOP_CONFIG_KEY "closed_loop_cfg"
@@ -63,6 +66,7 @@ static volatile uint32_t g_runtime_seq = 0;
 #define EXECUTOR_MAX_PLAN_AGE_US 3000U
 #define PLAN_RING_SIZE 16U
 #define PERF_WINDOW 128U
+#define SENSOR_FALLBACK_TIMEOUT_MS 100U
 
 #define EOI_CONFIG_KEY "eoi_config"
 #define EOI_CONFIG_VERSION 2U
@@ -164,9 +168,8 @@ static engine_injection_diag_t g_injection_diag = {0};
 static volatile uint32_t g_injection_diag_seq = 0;
 static bool g_engine_initialized = false;
 
-static float wrap_angle_360(float angle_deg);
-static float wrap_angle_720(float angle_deg);
-static float clamp_float(float v, float min_v, float max_v);
+static float compute_current_angle_360(const sync_data_t *sync, uint32_t tooth_count);
+static float sync_us_per_degree(const sync_data_t *sync, const sync_config_t *cfg);
 
 static uint32_t eoi_config_crc(const eoi_config_blob_t *cfg) {
     return esp_rom_crc32_le(0, (const uint8_t *)&cfg->boundary, (uint32_t)(sizeof(float) * 3));
@@ -258,36 +261,10 @@ static void eoit_map_config_apply(const eoit_map_config_blob_t *cfg) {
     g_eoit_normal_map = cfg->normal_map;
 }
 
-static float wrap_angle_360(float angle_deg) {
-    while (angle_deg >= 360.0f) {
-        angle_deg -= 360.0f;
-    }
-    while (angle_deg < 0.0f) {
-        angle_deg += 360.0f;
-    }
-    return angle_deg;
-}
-
-static float wrap_angle_720(float angle_deg) {
-    while (angle_deg >= 720.0f) {
-        angle_deg -= 720.0f;
-    }
-    while (angle_deg < 0.0f) {
-        angle_deg += 720.0f;
-    }
-    return angle_deg;
-}
-
 static float compute_current_angle_360(const sync_data_t *sync, uint32_t tooth_count) {
     float degrees_per_tooth = 360.0f / (float)(tooth_count + 2);
     float current_angle = sync->tooth_index * degrees_per_tooth;
     return wrap_angle_360(current_angle);
-}
-
-static float clamp_float(float v, float min_v, float max_v) {
-    if (v < min_v) return min_v;
-    if (v > max_v) return max_v;
-    return v;
 }
 
 static float sync_us_per_degree(const sync_data_t *sync, const sync_config_t *cfg) {
@@ -590,7 +567,7 @@ static bool injection_diag_read(engine_injection_diag_t *out) {
     return false;
 }
 
-static void engine_sync_tooth_callback(void *ctx) {
+IRAM_ATTR static void engine_sync_tooth_callback(void *ctx) {
     (void)ctx;
     if (g_planner_task_handle == NULL) {
         return;
@@ -675,14 +652,22 @@ static esp_err_t engine_control_build_plan(engine_plan_cmd_t *cmd) {
     }
 
     sensor_data_t sensor_data = {0};
+    uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
     if (sensor_get_data_fast(&sensor_data) != ESP_OK) {
         if (!g_last_sensor_valid) {
+            return ESP_FAIL;
+        }
+        // Check if fallback data is too old
+        uint32_t fallback_age = now_ms - g_last_sensor_timestamp_ms;
+        if (fallback_age > SENSOR_FALLBACK_TIMEOUT_MS) {
+            g_last_sensor_valid = false;
             return ESP_FAIL;
         }
         sensor_data = g_last_sensor_snapshot;
     } else {
         g_last_sensor_snapshot = sensor_data;
         g_last_sensor_valid = true;
+        g_last_sensor_timestamp_ms = now_ms;
     }
 
     uint16_t rpm = (uint16_t)sync_data.rpm;
@@ -867,10 +852,99 @@ static void engine_executor_task(void *arg) {
 
 static void engine_monitor_task(void *arg) {
     (void)arg;
+    uint32_t last_espnow_status_ms = 0;
+    uint32_t last_espnow_sensor_ms = 0;
+    uint32_t last_espnow_diag_ms = 0;
+    
     while (1) {
         uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
         maybe_persist_maps(now_ms);
-        vTaskDelay(pdMS_TO_TICKS(100));
+        
+        // Publish ESP-NOW messages if initialized
+        if (espnow_link_is_started()) {
+            // Send engine status at 10Hz
+            if (now_ms - last_espnow_status_ms >= ESPNOW_ENGINE_STATUS_INTERVAL_MS) {
+                last_espnow_status_ms = now_ms;
+                
+                espnow_engine_status_t status = {0};
+                engine_runtime_state_t state;
+                uint32_t seq;
+                engine_control_get_runtime_state(&state, &seq);
+                
+                status.rpm = state.rpm;
+                status.map_kpa10 = state.load;
+                status.advance_deg10 = state.advance_deg10;
+                status.pw_us = state.pw_us;
+                status.sync_status = state.sync_status;
+                status.limp_mode = state.limp_mode ? 1 : 0;
+                status.timestamp_ms = now_ms;
+                
+                // Get additional sensor data
+                sensor_data_t sensors;
+                if (sensor_get_data(&sensors) == ESP_OK) {
+                    status.clt_c10 = (int16_t)(sensors.clt_c * 10.0f);
+                    status.iat_c10 = (int16_t)(sensors.iat_c * 10.0f);
+                    status.tps_pct10 = (uint16_t)(sensors.tps_pct * 10.0f);
+                    status.battery_mv = (uint16_t)(sensors.vbat * 1000.0f);
+                }
+                
+                // Lambda values
+                status.lambda_target = (uint16_t)(state.lambda_target * 1000.0f);
+                status.lambda_measured = (uint16_t)(state.lambda_measured * 1000.0f);
+                
+                espnow_link_send_engine_status(&status);
+            }
+            
+            // Send sensor data at 10Hz
+            if (now_ms - last_espnow_sensor_ms >= ESPNOW_SENSOR_DATA_INTERVAL_MS) {
+                last_espnow_sensor_ms = now_ms;
+                
+                espnow_sensor_data_t sensor_data = {0};
+                sensor_data_t sensors;
+                
+                if (sensor_get_data(&sensors) == ESP_OK) {
+                    sensor_data.map_raw = sensors.map_raw;
+                    sensor_data.tps_raw = sensors.tps_raw;
+                    sensor_data.clt_raw = sensors.clt_raw;
+                    sensor_data.iat_raw = sensors.iat_raw;
+                    sensor_data.o2_raw = sensors.o2_raw;
+                    sensor_data.vbat_raw = sensors.vbat_raw;
+                    sensor_data.map_filtered = (uint16_t)(sensors.map_kpa * 10.0f);
+                    sensor_data.tps_filtered = (uint16_t)(sensors.tps_pct * 10.0f);
+                    sensor_data.sensor_faults = sensors.sensor_faults;
+                    sensor_data.timestamp_ms = now_ms;
+                }
+                
+                espnow_link_send_sensor_data(&sensor_data);
+            }
+            
+            // Send diagnostic at 1Hz
+            if (now_ms - last_espnow_diag_ms >= ESPNOW_DIAG_INTERVAL_MS) {
+                last_espnow_diag_ms = now_ms;
+                
+                espnow_diagnostic_t diag = {0};
+                diag.uptime_ms = now_ms;
+                diag.free_heap = (uint16_t)(esp_get_free_heap_size() / 1024);  // KB
+                
+                // Get sync statistics
+                const sync_data_t *sync = sync_get_data();
+                if (sync) {
+                    diag.sync_lost_count = sync->sync_lost_count;
+                    diag.tooth_count = sync->tooth_count;
+                }
+                
+                // Get safety status
+                limp_mode_t limp = safety_get_limp_mode_status();
+                if (limp.active) {
+                    diag.error_count = 1;
+                    diag.error_bitmap |= ESPNOW_ERR_LIMP_MODE;
+                }
+                
+                espnow_link_send_diagnostic(&diag);
+            }
+        }
+        
+        vTaskDelay(pdMS_TO_TICKS(10));  // 10ms tick for better timing resolution
     }
 }
 
@@ -1099,6 +1173,18 @@ esp_err_t engine_control_init(void) {
     }
     safety_monitor_init();
     safety_watchdog_init(1000);
+
+    // Initialize ESP-NOW link (optional - continues on failure)
+    err = espnow_link_init();
+    if (err == ESP_OK) {
+        ESP_LOGI("ENGINE_CONTROL", "ESP-NOW link initialized");
+        err = espnow_link_start();
+        if (err != ESP_OK) {
+            ESP_LOGW("ENGINE_CONTROL", "ESP-NOW link start failed, wireless telemetry disabled");
+        }
+    } else {
+        ESP_LOGW("ENGINE_CONTROL", "ESP-NOW init failed, wireless telemetry disabled");
+    }
 
     eoi_config_blob_t eoi_cfg = {0};
     if (config_manager_load(EOI_CONFIG_KEY, &eoi_cfg, sizeof(eoi_cfg)) != ESP_OK ||
