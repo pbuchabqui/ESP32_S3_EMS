@@ -29,10 +29,15 @@ bool fuel_injection_schedule_eoi(uint8_t cylinder_id,
                                  const sync_data_t *sync);
 
 bool fuel_injection_schedule_eoi_ex(uint8_t cylinder_id,
-                                    float target_eoi_deg,
-                                    uint32_t pulsewidth_us,
-                                    const sync_data_t *sync,
-                                    fuel_injection_schedule_info_t *info);
+                                     float target_eoi_deg,
+                                     uint32_t pulsewidth_us,
+                                     const sync_data_t *sync,
+                                     fuel_injection_schedule_info_t *info);
+
+// Schedule sequential injection for all cylinders
+bool fuel_injection_schedule_sequential(uint32_t pulsewidth_us[4],
+                                         float target_eoi_deg[4],
+                                         const sync_data_t *sync);
 
 #ifdef __cplusplus
 }

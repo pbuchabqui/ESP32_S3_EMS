@@ -6,6 +6,9 @@
  * - Timer contínuo sem reinício por evento (elimina jitter)
  * - Compare absoluto em ticks (sem recalculação de delay)
  * - Leitura direta de contador do timer
+ * 
+ * Estado HP centralizado:
+ * - Usa hp_state.h para estado compartilhado de alta precisão
  */
 
 #include "mcpwm_injection.h"
@@ -16,12 +19,16 @@
 #include "driver/gpio.h"
 #include "esp_log.h"
 #include "esp_err.h"
+#include "esp_private/mcpwm.h"
 #include "esp_rom_sys.h"
 #include "soc/soc_caps.h"
 #include "s3_control_config.h"
-#include "high_precision_timing.h"
+#include "hp_state.h"
 
 static const char* TAG = "MCPWM_INJECTION_HP";
+
+// Forward declaration
+bool mcpwm_injection_hp_deinit(void);
 
 #define HP_INJ_ABS_PERIOD_TICKS 30000000UL  // 30 segundos em ticks de 1us
 
@@ -40,16 +47,12 @@ typedef struct {
 static mcpwm_injection_channel_hp_t g_channels_hp[4];
 static bool g_initialized_hp = false;
 
-// Instâncias de alta precisão
-static hardware_latency_comp_t g_hw_latency_inj;
-static jitter_measurer_t g_jitter_measurer_inj;
-
 static mcpwm_injection_config_t g_cfg = {
     .base_frequency_hz = 1000000,
     .timer_resolution_bits = 20,
     .min_pulsewidth_us = 500,
     .max_pulsewidth_us = 18000,
-    .deadtime_us = 200,
+    .gpio_nums = {0, 0, 0, 0},
 };
 
 static bool mcpwm_ok_hp(esp_err_t err, const char *op, int channel) {
@@ -67,8 +70,8 @@ IRAM_ATTR static uint32_t clamp_u32_hp(uint32_t v, uint32_t min_v, uint32_t max_
 bool mcpwm_injection_hp_init(void) {
     if (g_initialized_hp) return true;
 
-    hp_init_hardware_latency(&g_hw_latency_inj);
-    hp_init_jitter_measurer(&g_jitter_measurer_inj);
+    // NOTA: O estado HP centralizado é inicializado por ignition_init()
+    // Este driver apenas configura o hardware MCPWM
 
     const gpio_num_t gpios[4] = {INJECTOR_GPIO_1, INJECTOR_GPIO_2, INJECTOR_GPIO_3, INJECTOR_GPIO_4};
 
@@ -144,6 +147,7 @@ bool mcpwm_injection_hp_init(void) {
     g_initialized_hp = true;
     ESP_LOGI(TAG, "MCPWM injection HP initialized with absolute compare");
     ESP_LOGI(TAG, "  Timer resolution: 1 MHz (1us per tick)");
+    ESP_LOGI(TAG, "  Using centralized HP state");
     return true;
 }
 
@@ -187,7 +191,8 @@ IRAM_ATTR bool mcpwm_injection_hp_schedule_one_shot_absolute(
     ch->is_active = true;
     ch->last_counter_value = current_counter;
 
-    hp_record_jitter(&g_jitter_measurer_inj, delay_us, delay_us);
+    // Registra jitter usando estado centralizado
+    hp_state_record_jitter(delay_us, delay_us);
 
     return true;
 }
@@ -233,10 +238,11 @@ bool mcpwm_injection_hp_stop_all(void) {
 bool mcpwm_injection_hp_get_status(uint8_t cylinder_id, mcpwm_injector_channel_t *status) {
     if (!g_initialized_hp || cylinder_id >= 4 || status == NULL) return false;
     mcpwm_injection_channel_hp_t *ch = &g_channels_hp[cylinder_id];
-    status->channel_id = cylinder_id;
-    status->gpio = ch->gpio;
-    status->pulsewidth_us = ch->pulsewidth_us;
     status->is_active = ch->is_active;
+    status->last_pulsewidth_us = ch->pulsewidth_us;
+    status->last_delay_us = ch->last_counter_value;
+    status->total_pulses = 0;
+    status->error_count = 0;
     return true;
 }
 
@@ -244,14 +250,14 @@ bool mcpwm_injection_hp_get_status(uint8_t cylinder_id, mcpwm_injector_channel_t
  * @brief Obtém estatísticas de jitter de injeção
  */
 void mcpwm_injection_hp_get_jitter_stats(float *avg_us, float *max_us, float *min_us) {
-    hp_get_jitter_stats(&g_jitter_measurer_inj, avg_us, max_us, min_us);
+    hp_state_get_jitter_stats(avg_us, max_us, min_us);
 }
 
 /**
  * @brief Aplica compensação de latência física de injetor
  */
 void mcpwm_injection_hp_apply_latency_compensation(float *pulsewidth_us, float battery_voltage, float temperature) {
-    float injector_latency = hp_get_injector_latency(&g_hw_latency_inj, battery_voltage, temperature);
+    float injector_latency = hp_state_get_injector_latency(battery_voltage, temperature);
     *pulsewidth_us += injector_latency;
 }
 
@@ -260,7 +266,8 @@ IRAM_ATTR uint32_t mcpwm_injection_hp_get_counter(uint8_t cylinder_id) {
         return 0;
     }
     uint32_t counter = 0;
-    esp_err_t err = mcpwm_timer_get_counter_value(g_channels_hp[cylinder_id].timer, &counter);
+    mcpwm_timer_direction_t direction;
+    esp_err_t err = mcpwm_timer_get_phase(g_channels_hp[cylinder_id].timer, &counter, &direction);
     if (err != ESP_OK) {
         return 0;
     }

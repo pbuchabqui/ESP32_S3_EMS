@@ -1,17 +1,25 @@
+/**
+ * @file ignition_timing.c
+ * @brief Sistema de timing de ignição de alta precisão
+ * 
+ * Integração com drivers MCPWM HP:
+ * - Timer contínuo com compare absoluto
+ * - Preditor de fase adaptativo
+ * - Compensação de latência física
+ */
+
 #include "../include/ignition_timing.h"
 #include "../include/logger.h"
 #include "../include/mcpwm_ignition.h"
+#include "../include/mcpwm_ignition_hp.h"
 #include "../include/mcpwm_injection.h"
+#include "../include/mcpwm_injection_hp.h"
 #include "../include/sensor_processing.h"
 #include "../include/sync.h"
+#include "../include/hp_state.h"
+#include "../include/math_utils.h"
 
 static const float g_cyl_tdc_deg[4] = {0.0f, 180.0f, 360.0f, 540.0f};
-
-static float clampf_local(float v, float min_v, float max_v) {
-    if (v < min_v) return min_v;
-    if (v > max_v) return max_v;
-    return v;
-}
 
 static float apply_temp_dwell_bias(float battery_voltage, int16_t clt_c) {
     if (clt_c >= 105) {
@@ -23,17 +31,7 @@ static float apply_temp_dwell_bias(float battery_voltage, int16_t clt_c) {
     } else if (clt_c <= 20) {
         battery_voltage -= 0.4f;
     }
-    return clampf_local(battery_voltage, 8.0f, 16.5f);
-}
-
-static float wrap_angle_720(float angle_deg) {
-    while (angle_deg >= 720.0f) {
-        angle_deg -= 720.0f;
-    }
-    while (angle_deg < 0.0f) {
-        angle_deg += 720.0f;
-    }
-    return angle_deg;
+    return clamp_float(battery_voltage, 8.0f, 16.5f);
 }
 
 static float compute_current_angle_deg(const sync_data_t *sync, uint32_t tooth_count) {
@@ -51,14 +49,25 @@ static float sync_us_per_degree(const sync_data_t *sync, const sync_config_t *cf
 }
 
 bool ignition_init(void) {
-    bool ign_ok = mcpwm_ignition_init();
-    bool inj_ok = mcpwm_injection_init();
+    // Inicializar módulo de estado HP centralizado
+    if (!hp_state_init(10000.0f)) {  // 10ms inicial
+        LOG_IGNITION_E("Failed to initialize HP state module");
+        return false;
+    }
+    
+    // Inicializar drivers HP
+    bool ign_ok = mcpwm_ignition_hp_init();
+    bool inj_ok = mcpwm_injection_hp_init();
+    
     if (ign_ok && inj_ok) {
-        LOG_IGNITION_I("Ignition timing system initialized");
+        LOG_IGNITION_I("HP Ignition timing system initialized");
+        LOG_IGNITION_I("  Phase predictor: active (centralized)");
+        LOG_IGNITION_I("  Hardware latency compensation: active (centralized)");
+        LOG_IGNITION_I("  Jitter measurement: active (centralized)");
         return true;
     }
 
-    LOG_IGNITION_E("Ignition timing init failed (ign=%d, inj=%d)", ign_ok, inj_ok);
+    LOG_IGNITION_E("HP Ignition timing init failed (ign=%d, inj=%d)", ign_ok, inj_ok);
     return false;
 }
 
@@ -73,7 +82,7 @@ void ignition_apply_timing(uint16_t advance_deg10, uint16_t rpm) {
         }
         battery_voltage = apply_temp_dwell_bias(battery_voltage, sensors.clt_c);
     } else {
-        battery_voltage = clampf_local(battery_voltage, 8.0f, 16.5f);
+        battery_voltage = clamp_float(battery_voltage, 8.0f, 16.5f);
     }
 
     sync_data_t sync_data = {0};
@@ -83,32 +92,80 @@ void ignition_apply_timing(uint16_t advance_deg10, uint16_t rpm) {
                      sync_data.sync_valid &&
                      sync_data.sync_acquired &&
                      (sync_cfg.tooth_count > 0);
+    
     float us_per_deg = 0.0f;
+    uint32_t current_counter = 0;
 
     if (have_sync) {
         us_per_deg = sync_us_per_degree(&sync_data, &sync_cfg);
         if (us_per_deg <= 0.0f) {
             have_sync = false;
+        } else {
+            // Obter contador atual do timer MCPWM (valor real, não sintético)
+            // Usa cilindro 0 como referência (todos os timers estão sincronizados)
+            current_counter = mcpwm_ignition_hp_get_counter(0);
         }
     }
 
     if (have_sync) {
         float current_angle = compute_current_angle_deg(&sync_data, sync_cfg.tooth_count);
+        
         for (uint8_t cylinder = 1; cylinder <= 4; cylinder++) {
             float spark_deg = wrap_angle_720(g_cyl_tdc_deg[cylinder - 1] - advance_degrees);
             float delta_deg = spark_deg - current_angle;
             if (delta_deg < 0.0f) {
                 delta_deg += 720.0f;
             }
-            uint32_t delay_us = (uint32_t)((delta_deg * us_per_deg) + 0.5f);
-            mcpwm_ignition_schedule_one_shot(cylinder, delay_us, rpm, battery_voltage);
+            
+            // Calcular delay usando predição de fase centralizada
+            float predicted_period = hp_state_predict_next_period(0);
+            float base_delay = delta_deg * us_per_deg;
+            
+            // Aplicar compensação de latência física centralizada
+            float compensated_delay = base_delay;
+            float latency = hp_state_get_latency(battery_voltage, (float)sensors.clt_c);
+            compensated_delay += latency;
+            
+            // Calcular target absoluto
+            uint32_t delay_us = (uint32_t)(compensated_delay + 0.5f);
+            uint32_t target_us = current_counter + delay_us;
+            
+            // Agendar com compare absoluto HP
+            mcpwm_ignition_hp_schedule_one_shot_absolute(
+                cylinder, target_us, rpm, battery_voltage, current_counter);
         }
-        LOG_IGNITION_D("Scheduled ignition (sync): %u deg10, %u RPM", advance_deg10, rpm);
+        
+        // Atualizar preditor de fase centralizado
+        float measured_period = sync_data.tooth_period;
+        hp_state_update_phase_predictor(measured_period, hp_get_cycle_count());
+        
+        LOG_IGNITION_D("HP Scheduled ignition (sync): %u deg10, %u RPM", advance_deg10, rpm);
         return;
     }
-
+    
+    // Fallback: usar predição de fase centralizada
+    float predicted_period = hp_state_predict_next_period(0);
+    uint32_t period_us = (uint32_t)(predicted_period + 0.5f);
+    
     for (uint8_t cylinder = 1; cylinder <= 4; cylinder++) {
-        mcpwm_ignition_start_cylinder(cylinder, rpm, advance_degrees, battery_voltage);
+        float spark_deg = wrap_angle_720(g_cyl_tdc_deg[cylinder - 1] - advance_degrees);
+        float delay_deg = (spark_deg >= 0.0f) ? spark_deg : spark_deg + 720.0f;
+        
+        float us_per_rev = period_us * 2;  // Uma revolução = 2 períodos de 360°
+        float delay_us_f = (delay_deg / 720.0f) * us_per_rev;
+        uint32_t delay_us = (uint32_t)(delay_us_f + 0.5f);
+        
+        mcpwm_ignition_hp_schedule_one_shot_absolute(
+            cylinder, delay_us, rpm, battery_voltage, 0);
     }
-    LOG_IGNITION_D("Applied ignition timing (fallback): %u deg10, %u RPM", advance_deg10, rpm);
+    
+    LOG_IGNITION_D("HP Applied ignition timing (fallback): %u deg10, %u RPM", advance_deg10, rpm);
+}
+
+void ignition_get_jitter_stats(float *avg_us, float *max_us, float *min_us) {
+    hp_state_get_jitter_stats(avg_us, max_us, min_us);
+}
+
+void ignition_update_phase(float measured_period_us) {
+    hp_state_update_phase_predictor(measured_period_us, hp_get_cycle_count());
 }

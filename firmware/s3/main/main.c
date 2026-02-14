@@ -2,6 +2,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include <inttypes.h>
 
 static const char* TAG = "S3_MAIN";
 
@@ -31,12 +32,12 @@ void app_main(void) {
             (void)engine_control_get_perf_stats(&perf);
             engine_injection_diag_t inj = {0};
             bool have_inj = (engine_control_get_injection_diag(&inj) == ESP_OK);
-            ESP_LOGI(TAG, "System running - RPM: %u, Load: %u kPa, Limp: %s",
+            ESP_LOGI(TAG, "System running - RPM: %" PRIu32 ", Load: %" PRIu32 " kPa, Limp: %s",
                      params.rpm,
                      params.load / 10,
                      params.is_limp_mode ? "YES" : "NO");
             ESP_LOGI(TAG,
-                     "Perf planner(us) p95=%u p99=%u max=%u miss=%u | exec(us) p95=%u p99=%u max=%u miss=%u | q_ovr=%u q_peak=%u n=%u",
+                     "Perf planner(us) p95=%" PRIu32 " p99=%" PRIu32 " max=%" PRIu32 " miss=%" PRIu32 " | exec(us) p95=%" PRIu32 " p99=%" PRIu32 " max=%" PRIu32 " miss=%" PRIu32 " | q_ovr=%" PRIu32 " q_peak=%" PRIu32 " n=%" PRIu32,
                      perf.planner_p95_us, perf.planner_p99_us, perf.planner_max_us, perf.planner_deadline_miss,
                      perf.executor_p95_us, perf.executor_p99_us, perf.executor_max_us, perf.executor_deadline_miss,
                      perf.queue_overruns, perf.queue_depth_peak, perf.sample_count);

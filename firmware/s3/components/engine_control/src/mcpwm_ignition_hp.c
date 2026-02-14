@@ -7,6 +7,9 @@
  * - Compare absoluto em ticks (sem recalculação de delay)
  * - Leitura direta de contador do timer
  * - Core isolamento para timing crítico
+ * 
+ * Estado HP centralizado:
+ * - Usa hp_state.h para estado compartilhado de alta precisão
  */
 
 #include "mcpwm_ignition.h"
@@ -17,12 +20,16 @@
 #include "driver/gpio.h"
 #include "esp_log.h"
 #include "esp_err.h"
+#include "esp_private/mcpwm.h"
 #include "math.h"
 #include "soc/soc_caps.h"
 #include "s3_control_config.h"
-#include "high_precision_timing.h"
+#include "hp_state.h"
 
 static const char* TAG = "MCPWM_IGNITION_HP";
+
+// Forward declaration
+bool mcpwm_ignition_hp_deinit(void);
 
 // Configuração de período absoluto para janelas de timing
 #define HP_ABS_PERIOD_TICKS 30000000UL  // 30 segundos em ticks de 1us
@@ -41,11 +48,6 @@ typedef struct {
 
 static mcpwm_ign_channel_hp_t g_channels_hp[4];
 static bool g_initialized_hp = false;
-
-// Instâncias de alta precisão
-static phase_predictor_t g_phase_predictor;
-static hardware_latency_comp_t g_hw_latency;
-static jitter_measurer_t g_jitter_measurer;
 
 static bool mcpwm_ok_hp(esp_err_t err, const char *op, int channel) {
     if (err == ESP_OK) return true;
@@ -76,9 +78,8 @@ IRAM_ATTR static uint32_t calculate_spark_ticks_hp(uint16_t rpm, float advance_d
 bool mcpwm_ignition_hp_init(void) {
     if (g_initialized_hp) return true;
 
-    hp_init_phase_predictor(&g_phase_predictor, 10000.0f);
-    hp_init_hardware_latency(&g_hw_latency);
-    hp_init_jitter_measurer(&g_jitter_measurer);
+    // NOTA: O estado HP centralizado é inicializado por ignition_init()
+    // Este driver apenas configura o hardware MCPWM
 
     const gpio_num_t gpios[4] = {IGNITION_GPIO_1, IGNITION_GPIO_2, IGNITION_GPIO_3, IGNITION_GPIO_4};
 
@@ -150,6 +151,7 @@ bool mcpwm_ignition_hp_init(void) {
     g_initialized_hp = true;
     ESP_LOGI(TAG, "MCPWM ignition HP initialized with absolute compare");
     ESP_LOGI(TAG, "  Timer resolution: 1 MHz (1us per tick)");
+    ESP_LOGI(TAG, "  Using centralized HP state");
     return true;
 }
 
@@ -184,7 +186,8 @@ IRAM_ATTR bool mcpwm_ignition_hp_schedule_one_shot_absolute(
     ch->is_active = true;
     ch->last_counter_value = current_counter;
 
-    hp_record_jitter(&g_jitter_measurer, target_us, target_us);
+    // Registra jitter usando estado centralizado
+    hp_state_record_jitter(target_us, target_us);
 
     return true;
 }
@@ -199,15 +202,15 @@ bool mcpwm_ignition_hp_stop_cylinder(uint8_t cylinder_id) {
 }
 
 IRAM_ATTR void mcpwm_ignition_hp_update_phase_predictor(float measured_period_us, uint32_t timestamp) {
-    hp_update_phase_predictor(&g_phase_predictor, measured_period_us, timestamp);
+    hp_state_update_phase_predictor(measured_period_us, timestamp);
 }
 
 void mcpwm_ignition_hp_get_jitter_stats(float *avg_us, float *max_us, float *min_us) {
-    hp_get_jitter_stats(&g_jitter_measurer, avg_us, max_us, min_us);
+    hp_state_get_jitter_stats(avg_us, max_us, min_us);
 }
 
 void mcpwm_ignition_hp_apply_latency_compensation(float *timing_us, float battery_voltage, float temperature) {
-    float coil_latency = hp_get_coil_latency(&g_hw_latency, battery_voltage, temperature);
+    float coil_latency = hp_state_get_latency(battery_voltage, temperature);
     *timing_us += coil_latency;
 }
 
@@ -216,7 +219,8 @@ IRAM_ATTR uint32_t mcpwm_ignition_hp_get_counter(uint8_t cylinder_id) {
         return 0;
     }
     uint32_t counter = 0;
-    esp_err_t err = mcpwm_timer_get_counter_value(g_channels_hp[cylinder_id].timer, &counter);
+    mcpwm_timer_direction_t direction;
+    esp_err_t err = mcpwm_timer_get_phase(g_channels_hp[cylinder_id].timer, &counter, &direction);
     if (err != ESP_OK) {
         return 0;
     }

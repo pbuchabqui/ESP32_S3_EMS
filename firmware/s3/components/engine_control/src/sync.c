@@ -16,6 +16,7 @@
 #include "freertos/semphr.h"
 #include <stdint.h>
 #include <string.h>
+#include <inttypes.h>
 
 // Static variables
 static SemaphoreHandle_t g_sync_mutex = NULL;
@@ -523,7 +524,7 @@ IRAM_ATTR static void sync_update_from_capture(uint64_t capture_us, bool from_is
     }
 
     if (emit_log && gap) {
-        ESP_LOGI("SYNC", "Gap detected at tooth %d", g_sync_data.tooth_index);
+        ESP_LOGI("SYNC", "Gap detected at tooth %" PRIu32, g_sync_data.tooth_index);
     }
 }
 

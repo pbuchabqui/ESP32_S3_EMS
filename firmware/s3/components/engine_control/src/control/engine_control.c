@@ -14,10 +14,13 @@
 #include "../include/twai_lambda.h"
 #include "../include/math_utils.h"
 #include "../include/espnow_link.h"
+#include "../include/mcpwm_injection_hp.h"
+#include "../include/mcpwm_ignition_hp.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "esp_rom_crc.h"
+#include "esp_log.h"
 #include <math.h>
 #include <stdint.h>
 #include <string.h>
@@ -632,16 +635,17 @@ static void schedule_semi_seq_injection(uint16_t rpm,
     float soi0 = wrap_angle_360(eoi0 - pw_deg);
     float delta0 = soi0 - current_angle;
     uint32_t delay0 = angle_delta_to_delay_us(delta0, 360.0f, us_per_deg);
-    mcpwm_injection_schedule_one_shot(0, delay0, pw_us);
-    mcpwm_injection_schedule_one_shot(3, delay0, pw_us);
+    uint32_t counter = mcpwm_injection_hp_get_counter(0);
+    mcpwm_injection_hp_schedule_one_shot_absolute(0, delay0, pw_us, counter);
+    mcpwm_injection_hp_schedule_one_shot_absolute(3, delay0, pw_us, counter);
 
     // Pair 2: cylinders 2 & 3 at 180°
     float eoi180 = wrap_angle_360(eoi_base_deg + 180.0f);
     float soi180 = wrap_angle_360(eoi180 - pw_deg);
     float delta180 = soi180 - current_angle;
     uint32_t delay180 = angle_delta_to_delay_us(delta180, 360.0f, us_per_deg);
-    mcpwm_injection_schedule_one_shot(1, delay180, pw_us);
-    mcpwm_injection_schedule_one_shot(2, delay180, pw_us);
+    mcpwm_injection_hp_schedule_one_shot_absolute(1, delay180, pw_us, counter);
+    mcpwm_injection_hp_schedule_one_shot_absolute(2, delay180, pw_us, counter);
 }
 
 static void schedule_wasted_spark(uint16_t advance_deg10, uint16_t rpm, const sync_data_t *sync) {
@@ -660,14 +664,15 @@ static void schedule_wasted_spark(uint16_t advance_deg10, uint16_t rpm, const sy
     float spark0 = wrap_angle_360(0.0f - advance_deg);
     float delta0 = spark0 - current_angle;
     uint32_t delay0 = angle_delta_to_delay_us(delta0, 360.0f, us_per_deg);
-    mcpwm_ignition_schedule_one_shot(1, delay0, rpm, 13.5f);
-    mcpwm_ignition_schedule_one_shot(4, delay0, rpm, 13.5f);
+    uint32_t counter = mcpwm_ignition_hp_get_counter(0);
+    mcpwm_ignition_hp_schedule_one_shot_absolute(1, delay0, rpm, 13.5f, counter);
+    mcpwm_ignition_hp_schedule_one_shot_absolute(4, delay0, rpm, 13.5f, counter);
 
     float spark180 = wrap_angle_360(180.0f - advance_deg);
     float delta180 = spark180 - current_angle;
     uint32_t delay180 = angle_delta_to_delay_us(delta180, 360.0f, us_per_deg);
-    mcpwm_ignition_schedule_one_shot(2, delay180, rpm, 13.5f);
-    mcpwm_ignition_schedule_one_shot(3, delay180, rpm, 13.5f);
+    mcpwm_ignition_hp_schedule_one_shot_absolute(2, delay180, rpm, 13.5f, counter);
+    mcpwm_ignition_hp_schedule_one_shot_absolute(3, delay180, rpm, 13.5f, counter);
 }
 
 static esp_err_t engine_control_build_plan(engine_plan_cmd_t *cmd) {
@@ -896,16 +901,13 @@ static void engine_monitor_task(void *arg) {
                 last_espnow_status_ms = now_ms;
                 
                 espnow_engine_status_t status = {0};
-                engine_runtime_state_t state;
-                uint32_t seq;
-                engine_control_get_runtime_state(&state, &seq);
+                engine_params_t params = {0};
+                engine_control_get_engine_parameters(&params);
                 
-                status.rpm = state.rpm;
-                status.map_kpa10 = state.load;
-                status.advance_deg10 = state.advance_deg10;
-                status.pw_us = state.pw_us;
-                status.sync_status = state.sync_status;
-                status.limp_mode = state.limp_mode ? 1 : 0;
+                status.rpm = params.rpm;
+                status.map_kpa10 = params.load;
+                status.advance_deg10 = params.advance_deg10;
+                status.limp_mode = params.is_limp_mode ? 1 : 0;
                 status.timestamp_ms = now_ms;
                 
                 // Get additional sensor data
@@ -913,13 +915,9 @@ static void engine_monitor_task(void *arg) {
                 if (sensor_get_data(&sensors) == ESP_OK) {
                     status.clt_c10 = (int16_t)(sensors.clt_c * 10.0f);
                     status.iat_c10 = (int16_t)(sensors.iat_c * 10.0f);
-                    status.tps_pct10 = (uint16_t)(sensors.tps_pct * 10.0f);
-                    status.battery_mv = (uint16_t)(sensors.vbat * 1000.0f);
+                    status.tps_pct10 = (uint16_t)(sensors.tps_percent * 10.0f);
+                    status.battery_mv = (uint16_t)(sensors.vbat_dv * 100.0f);
                 }
-                
-                // Lambda values
-                status.lambda_target = (uint16_t)(state.lambda_target * 1000.0f);
-                status.lambda_measured = (uint16_t)(state.lambda_measured * 1000.0f);
                 
                 espnow_link_send_engine_status(&status);
             }
@@ -932,15 +930,8 @@ static void engine_monitor_task(void *arg) {
                 sensor_data_t sensors;
                 
                 if (sensor_get_data(&sensors) == ESP_OK) {
-                    sensor_data.map_raw = sensors.map_raw;
-                    sensor_data.tps_raw = sensors.tps_raw;
-                    sensor_data.clt_raw = sensors.clt_raw;
-                    sensor_data.iat_raw = sensors.iat_raw;
-                    sensor_data.o2_raw = sensors.o2_raw;
-                    sensor_data.vbat_raw = sensors.vbat_raw;
-                    sensor_data.map_filtered = (uint16_t)(sensors.map_kpa * 10.0f);
-                    sensor_data.tps_filtered = (uint16_t)(sensors.tps_pct * 10.0f);
-                    sensor_data.sensor_faults = sensors.sensor_faults;
+                    sensor_data.map_filtered = sensors.map_kpa10;
+                    sensor_data.tps_filtered = (uint16_t)(sensors.tps_percent * 10.0f);
                     sensor_data.timestamp_ms = now_ms;
                 }
                 
@@ -956,10 +947,9 @@ static void engine_monitor_task(void *arg) {
                 diag.free_heap = (uint16_t)(esp_get_free_heap_size() / 1024);  // KB
                 
                 // Get sync statistics
-                const sync_data_t *sync = sync_get_data();
-                if (sync) {
-                    diag.sync_lost_count = sync->sync_lost_count;
-                    diag.tooth_count = sync->tooth_count;
+                sync_data_t sync_data;
+                if (sync_get_data(&sync_data) == ESP_OK) {
+                    diag.tooth_count = sync_data.tooth_index;
                 }
                 
                 // Get safety status
@@ -1363,8 +1353,8 @@ esp_err_t engine_control_deinit(void) {
     sync_stop();
     sync_deinit();
     twai_lambda_deinit();
-    mcpwm_injection_deinit();
-    mcpwm_ignition_deinit();
+    mcpwm_injection_hp_deinit();
+    mcpwm_ignition_hp_deinit();
 
     config_manager_deinit();
     if (g_map_mutex != NULL) {

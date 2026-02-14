@@ -164,22 +164,20 @@ void hp_get_jitter_stats(jitter_measurer_t *measurer,
 // CONFIGURAÇÃO DE CORE E PRIORIDADE
 //=============================================================================
 
+// Temporarily disabled - requires SMP FreeRTOS
+#if 0
 BaseType_t hp_set_task_core_affinity(TaskHandle_t task_handle, UBaseType_t core_id) {
     if (task_handle == NULL || core_id > 1) {
         ESP_LOGE(TAG, "Invalid parameters for core affinity");
         return pdFALSE;
     }
     
-    BaseType_t result = xTaskAffinitySet(task_handle, (1 << core_id));
+    vTaskCoreAffinitySet(task_handle, (1 << core_id));
+    ESP_LOGI(TAG, "Task 0x%08X assigned to core %d", (unsigned)task_handle, core_id);
     
-    if (result == pdPASS) {
-        ESP_LOGI(TAG, "Task 0x%08X assigned to core %d", (unsigned)task_handle, core_id);
-    } else {
-        ESP_LOGE(TAG, "Failed to set task affinity for core %d", core_id);
-    }
-    
-    return result;
+    return pdTRUE;
 }
+#endif
 
 BaseType_t hp_set_task_max_priority(TaskHandle_t task_handle) {
     if (task_handle == NULL) {

@@ -20,6 +20,9 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "esp_attr.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "sdkconfig.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -30,7 +33,11 @@ extern "C" {
 //=============================================================================
 
 // CPU frequency em MHz (compile-time constant para otimização)
-#define HP_CPU_FREQ_MHZ CONFIG_ESP32_DEFAULT_CPU_FREQ_MHZ
+#ifdef CONFIG_ESP32S3_DEFAULT_CPU_FREQ_MHZ
+#define HP_CPU_FREQ_MHZ CONFIG_ESP32S3_DEFAULT_CPU_FREQ_MHZ
+#else
+#define HP_CPU_FREQ_MHZ 240  // Default to 240MHz for ESP32-S3
+#endif
 
 //=============================================================================
 // SISTEMA DE CONTAGEM DE CICLOS (CCOUNT)

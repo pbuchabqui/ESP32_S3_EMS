@@ -7,6 +7,9 @@
 #include "freertos/semphr.h"
 #include "soc/soc.h"
 
+// Forward declaration of static functions
+static bool should_apply_accel_enrichment(int current_map, int previous_map);
+
 // Limp mode recovery configuration
 #define LIMP_MIN_DURATION_MS 5000     // Minimum time in limp mode before recovery
 #define LIMP_RECOVERY_HYSTERESIS_MS 2000  // Time conditions must be safe before recovery
